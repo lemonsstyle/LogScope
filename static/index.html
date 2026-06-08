@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LogScope</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <div>
+        <h1>LogScope（只读查询日志）</h1>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel connection-panel" aria-labelledby="connectionsTitle">
+        <div class="panel-head connection-panel-head">
+          <div>
+            <h2 id="connectionsTitle">连接</h2>
+          </div>
+          <button id="newConnectionButton" type="button">新建连接</button>
+        </div>
+        <div id="connectionsState" class="state-card">读取连接列表中…</div>
+        <div id="connectionsList" class="stack connection-list"></div>
+      </section>
+
+      <section id="connectionFormPanel" class="panel connection-config-panel" aria-labelledby="connectionFormTitle">
+          <div class="panel-head">
+            <div>
+              <h2 id="connectionFormTitle">连接配置</h2>
+            </div>
+          </div>
+          <div class="panel-body connection-config-body">
+            <div class="subhead-actions">
+              <p class="helper">密码只用于当前页面，不存本地。</p>
+              <button id="resetFormButton" type="button" class="ghost">清空</button>
+            </div>
+            <form id="connectionForm" class="form-grid connection-form">
+              <input type="hidden" id="connectionId">
+              <label>
+                <span>名称</span>
+                <input id="name" name="name" placeholder="线上日志库" required>
+              </label>
+              <label>
+                <span>数据库类型</span>
+                <select id="databaseType" name="database_type">
+                  <option value="auto" selected>自动识别</option>
+                  <option value="mysql">MySQL</option>
+                  <option value="postgresql">PostgreSQL</option>
+                  <option value="sqlserver">SQL Server</option>
+                </select>
+              </label>
+              <label>
+                <span>主机</span>
+                <input id="host" name="host" placeholder="127.0.0.1" required>
+              </label>
+              <label>
+                <span>端口</span>
+                <input id="port" name="port" type="number" value="3306" required>
+              </label>
+              <label>
+                <span>用户名</span>
+                <input id="username" name="username" placeholder="root" required>
+              </label>
+              <label>
+                <span>密码</span>
+                <input id="password" name="password" type="password" placeholder="仅用于测试和当前查询，不保存">
+              </label>
+              <label>
+                <span>默认数据库</span>
+                <input id="database" name="database" placeholder="logs">
+              </label>
+            </form>
+            <div id="connectionFeedback" class="inline-feedback" aria-live="polite"></div>
+            <div class="actions connection-actions">
+              <div class="action-cluster">
+                <button type="button" id="testConnectionButton">测试连接</button>
+                <details id="charsetDisclosure" class="inline-disclosure">
+                  <summary class="icon-summary" aria-label="字符集选项" title="字符集选项">⋯</summary>
+                  <label class="charset-popover">
+                    <span>字符集</span>
+                    <select id="charset" name="charset">
+                      <option value="utf8mb4" selected>utf8mb4</option>
+                      <option value="utf8">utf8</option>
+                      <option value="gbk">gbk</option>
+                      <option value="latin1">latin1</option>
+                    </select>
+                    <small class="field-note">默认 `utf8mb4`；只有目标库有特殊编码要求时再改。</small>
+                  </label>
+                </details>
+              </div>
+              <button type="submit" id="saveConnectionButton" form="connectionForm">保存连接</button>
+            </div>
+          </div>
+      </section>
+
+      <section class="panel explorer" aria-labelledby="explorerTitle">
+        <div class="panel-head">
+          <h2 id="explorerTitle">选表</h2>
+        </div>
+        <div class="explorer-row">
+          <label>
+            <span>当前连接</span>
+            <select id="activeConnection"></select>
+          </label>
+          <button id="loadSchemasButton" type="button">读取库表</button>
+        </div>
+        <div id="schemaState" class="state-card">先在连接配置里输入密码并测试或保存连接。</div>
+        <div class="picker-grid">
+          <label>
+            <span>数据库/Schema</span>
+            <input id="schemaFilter" placeholder="筛选数据库/Schema">
+            <select id="schemaList" size="12" aria-label="数据库/Schema 列表"></select>
+          </label>
+          <label>
+            <span>表</span>
+            <input id="tableFilter" placeholder="筛选表名">
+            <select id="tableList" size="12" aria-label="表列表"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel query-panel" aria-labelledby="queryTitle">
+        <div class="panel-head">
+          <h2 id="queryTitle">查结果</h2>
+          <button id="toggleSqlButton" type="button" class="ghost">高级 SQL</button>
+        </div>
+        <form id="searchForm" class="form-grid query-form">
+          <div class="keyword-group">
+            <label class="keyword-terms-field">
+              <span>关键词</span>
+              <textarea id="keywordTerms" rows="5" placeholder="每行一个关键词；同时满足条件。例如：&#10;_LIDAR_&#10;53982"></textarea>
+            </label>
+            <label class="keyword-fields-field">
+              <span>关键词对应字段</span>
+              <small class="field-note">只在你勾选的字段里做关键词匹配；不选字段时无法执行关键词查询。</small>
+              <select id="keywordFields" multiple size="6"></select>
+            </label>
+          </div>
+          <label>
+            <span>时间列</span>
+            <select id="timeColumn"></select>
+          </label>
+          <label>
+            <span>时间模板</span>
+            <input id="timeMode" type="hidden" value="range">
+            <div class="mode-switch" role="tablist" aria-label="时间模板">
+              <button type="button" class="mode-button is-active" data-mode="range">时间段</button>
+              <button type="button" class="mode-button" data-mode="point">时间点</button>
+            </div>
+          </label>
+          <label class="span-2 time-range-group">
+            <span>时间段快捷模板</span>
+            <div class="pill-row">
+              <button type="button" class="ghost preset-button" data-preset="1d">最近 1 天</button>
+              <button type="button" class="ghost preset-button" data-preset="3d">最近 3 天</button>
+              <button type="button" class="ghost preset-button" data-preset="7d">最近 1 周</button>
+            </div>
+          </label>
+          <label class="span-2 time-point-group hidden">
+            <span>时间点快捷模板</span>
+            <div class="pill-row">
+              <button type="button" class="ghost point-button" data-point="today">今天</button>
+              <button type="button" class="ghost point-button" data-point="yesterday">昨天</button>
+            </div>
+          </label>
+          <label class="time-range-group">
+            <span>开始时间</span>
+            <input id="timeFrom" placeholder="20260606">
+          </label>
+          <label class="time-range-group">
+            <span>结束时间</span>
+            <input id="timeTo" placeholder="20260606">
+          </label>
+          <label class="span-2 time-point-group hidden">
+            <span>时间点</span>
+            <input id="timePoint" placeholder="20260606">
+          </label>
+          <label class="span-2 result-limit-field">
+            <span>结果条数</span>
+            <div class="range-row">
+              <input id="limit" type="range" value="33" min="0" max="100" step="1">
+              <strong id="limitValue">100</strong>
+            </div>
+          </label>
+          <label class="wide">
+            <span>显示列</span>
+            <select id="visibleColumns" multiple size="5"></select>
+          </label>
+          <div class="actions wide">
+            <div class="action-cluster">
+              <button type="submit">执行查询</button>
+              <button type="button" class="ghost danger cancel-query-button hidden">终止查询</button>
+              <details id="timeoutDisclosure" class="inline-disclosure">
+                <summary class="icon-summary" aria-label="查询超时设置" title="查询超时设置">⋯</summary>
+                <div class="timeout-popover">
+                  <label>
+                    <span>查询超时</span>
+                    <div class="timeout-options">
+                      <button type="button" class="timeout-option" data-timeout="60000">1 分钟</button>
+                      <button type="button" class="timeout-option" data-timeout="180000">3 分钟</button>
+                      <button type="button" class="timeout-option is-active" data-timeout="300000">5 分钟</button>
+                      <button type="button" class="timeout-option" data-timeout="600000">10 分钟</button>
+                    </div>
+                    <small class="field-note">默认 5 分钟；超时会自动取消查询。</small>
+                  </label>
+                </div>
+              </details>
+            </div>
+          </div>
+        </form>
+
+        <section id="sqlPanel" class="sql-panel hidden">
+          <div class="sql-mode-banner">SQL 模式已开启，表单筛选已暂时隐藏。</div>
+          <label>
+            <span>只读 SQL</span>
+            <textarea id="sqlEditor" rows="6" placeholder="SELECT * FROM your_table ORDER BY created_at DESC LIMIT 100"></textarea>
+          </label>
+          <div class="actions">
+            <button id="runSqlButton" type="button">执行 SQL</button>
+            <button type="button" class="ghost danger cancel-query-button hidden">终止查询</button>
+          </div>
+        </section>
+
+        <div id="resultsState" class="state-card">先选中一张表，再执行查询。</div>
+        <div class="results-meta" id="resultsMeta"></div>
+        <div class="table-wrap">
+          <table id="resultsTable">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="resultsCards" class="results-cards"></div>
+      </section>
+    </main>
+  </div>
+
+  <template id="connectionCardTemplate">
+    <article class="connection-card">
+      <div>
+        <h3></h3>
+        <p class="connection-meta"></p>
+      </div>
+      <div class="card-actions">
+        <button type="button" data-action="edit">编辑</button>
+        <button type="button" data-action="use" class="ghost">使用</button>
+        <button type="button" data-action="delete" class="danger">删除</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
