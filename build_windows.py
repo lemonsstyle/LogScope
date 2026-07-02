@@ -79,16 +79,15 @@ def main():
     try:
         subprocess.run(cmd, check=True)
         dist_dir = project_root / "dist" / "LogScope"
-        for asset_name in ("Start-LogScope-Console.bat", "Stop-LogScope.bat"):
-            shutil.copy2(project_root / asset_name, dist_dir / asset_name)
+        shutil.copy2(project_root / "Run-LogScope.bat", dist_dir / "Run-LogScope.bat")
         print("\n" + "=" * 60)
         print("✓ 打包成功!")
         print("=" * 60)
         print(f"\n输出目录: {dist_dir}")
         print("\n下一步:")
-        print("1. 测试运行 Start-LogScope-Console.bat")
+        print("1. 测试运行 Run-LogScope.bat")
         print("2. 将整个 LogScope 文件夹复制到Windows电脑")
-        print("3. 停止服务时运行 Stop-LogScope.bat")
+        print("3. 使用完成后关闭 Run-LogScope.bat 的控制台窗口")
     except subprocess.CalledProcessError as e:
         print(f"\n[错误] 打包失败: {e}")
         sys.exit(1)

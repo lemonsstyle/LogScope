@@ -1,34 +1,29 @@
 @echo off
-REM LogScope Startup Script - Shows Console
+REM LogScope single-window runner
 
 setlocal
 set "LOGSCOPE_HOST=127.0.0.1"
 set "LOGSCOPE_PORT=8765"
+set "LOGSCOPE_URL=http://%LOGSCOPE_HOST%:%LOGSCOPE_PORT%"
 
-title LogScope
+title LogScope - close this window to stop
+
 echo.
 echo ========================================
 echo    LogScope - Database Log Query Tool
 echo ========================================
 echo.
-echo Starting server...
+echo Starting service...
+echo URL: %LOGSCOPE_URL%
 echo.
-
 echo Opening browser...
-start "" /B cmd /C "timeout /t 2 /nobreak >nul & start http://%LOGSCOPE_HOST%:%LOGSCOPE_PORT%"
-
+start "" /B cmd /C "timeout /t 2 /nobreak >nul & start %LOGSCOPE_URL%"
 echo.
 echo ========================================
-echo   Service starting: http://%LOGSCOPE_HOST%:%LOGSCOPE_PORT%
+echo   Close this window to stop LogScope
 echo ========================================
 echo.
-echo Instructions:
-echo   - Browser opened automatically
-echo   - This window owns the service process
-echo   - You can also run Stop-LogScope.bat from another window
-echo   - Data saved in: %USERPROFILE%\.heidisql-lite
-echo.
-echo Press Ctrl+C or close window to stop server
+echo Data saved in: %USERPROFILE%\.heidisql-lite
 echo.
 
 LogScope.exe --host %LOGSCOPE_HOST% --port %LOGSCOPE_PORT%
