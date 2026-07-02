@@ -205,6 +205,20 @@ def normalize_keyword_terms(terms: list[str] | None, fallback_keyword: str | Non
     return normalized
 
 
+def normalize_keyword_field_terms(items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        column = str(item.get("column") or "").strip()
+        terms = normalize_keyword_terms(item.get("terms") if isinstance(item.get("terms"), list) else None)
+        if column and terms:
+            normalized.append({"column": column, "terms": terms})
+    return normalized
+
+
 def _parse_datetime_candidate(value: str) -> tuple[datetime, str] | None:
     text = value.strip()
     candidates = [
@@ -472,6 +486,7 @@ class DatabaseGateway:
         table: str,
         keyword_terms: list[str] | None,
         keyword_columns: list[str] | None,
+        keyword_field_terms: list[dict[str, Any]] | None,
         time_column: str | None,
         time_mode: str | None,
         time_point: str | None,
@@ -496,8 +511,26 @@ class DatabaseGateway:
         where_parts: list[str] = []
         params: list[Any] = []
 
+        normalized_keyword_field_terms = keyword_field_terms or []
+        if normalized_keyword_field_terms:
+            invalid_keyword_columns = [item["column"] for item in normalized_keyword_field_terms if item["column"] not in column_map]
+            if invalid_keyword_columns:
+                raise AppError(f"关键词字段不存在: {', '.join(invalid_keyword_columns)}", 400)
+
+            for item in normalized_keyword_field_terms:
+                metadata = column_map[item["column"]]
+                expression = self.quote_identifier(item["column"])
+                if not metadata["is_text_searchable"]:
+                    expression = self.text_cast(expression)
+                like_parts: list[str] = []
+                for term in item["terms"]:
+                    escaped_term = escape_like_literal(term)
+                    like_parts.append(f"{expression} LIKE %s ESCAPE '!'")
+                    params.append(f"%{escaped_term}%")
+                where_parts.append("(" + " OR ".join(like_parts) + ")")
+
         normalized_terms = normalize_keyword_terms(keyword_terms)
-        if normalized_terms:
+        if normalized_terms and not normalized_keyword_field_terms:
             candidate_keyword_columns = keyword_columns or [
                 row["column_name"] for row in columns if row["is_text_searchable"]
             ]
@@ -563,6 +596,7 @@ class DatabaseGateway:
             "limit": limit,
             "keyword_terms": normalized_terms,
             "keyword_columns": keyword_columns or [],
+            "keyword_field_terms": normalized_keyword_field_terms,
             "elapsed_time": elapsed_time,
         }
 
@@ -1043,6 +1077,7 @@ class Application:
                 table=table,
                 keyword_terms=normalize_keyword_terms(body.get("keyword_terms"), (body.get("keyword") or "").strip() or None),
                 keyword_columns=body.get("keyword_columns"),
+                keyword_field_terms=normalize_keyword_field_terms(body.get("keyword_field_terms")),
                 time_column=(body.get("time_column") or "").strip() or None,
                 time_mode=(body.get("time_mode") or "range").strip(),
                 time_point=(body.get("time_point") or "").strip() or None,

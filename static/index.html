@@ -131,12 +131,11 @@
           <div class="keyword-group">
             <label class="keyword-terms-field">
               <span>关键词</span>
-              <textarea id="keywordTerms" rows="5" placeholder="每行一个关键词；同时满足条件。例如：&#10;_LIDAR_&#10;53982"></textarea>
+              <textarea id="keywordTerms" rows="5" placeholder="每一行对应右侧同一行字段；空行保留位置并跳过。多个关键词用逗号或分号分隔。"></textarea>
             </label>
             <label class="keyword-fields-field">
               <span>关键词对应字段</span>
-              <small class="field-note">只在你勾选的字段里做关键词匹配；不选字段时无法执行关键词查询。</small>
-              <select id="keywordFields" multiple size="6"></select>
+              <textarea id="keywordFields" rows="5" readonly placeholder="选择表后自动列出字段"></textarea>
             </label>
           </div>
           <div class="filter-section time-filter-section">

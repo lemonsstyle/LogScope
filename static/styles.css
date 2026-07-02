@@ -187,14 +187,8 @@ select[size] {
   min-height: 14rem;  /* 增加从 8.5rem 到 14rem，约 12-15 行 */
 }
 
-#keywordFields,
 #visibleColumns {
   min-height: 8rem;  /* 增加从 6.8rem 到 8rem */
-}
-
-/* Override for keyword fields in side-by-side layout */
-#keywordFields {
-  min-height: 140px;
 }
 
 textarea {
@@ -489,6 +483,8 @@ h1 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-3);
+  --keyword-row-height: 2.35rem;
+  --keyword-row-line: rgba(68, 94, 116, 0.16);
 }
 
 .keyword-terms-field,
@@ -497,12 +493,29 @@ h1 {
   gap: var(--space-1);
 }
 
-.keyword-terms-field textarea {
-  min-height: 140px;
+.keyword-terms-field textarea,
+.keyword-fields-field textarea {
+  min-height: 150px;
+  line-height: var(--keyword-row-height);
+  resize: vertical;
+  overflow-y: scroll;
+  white-space: pre;
+  padding-top: 0;
+  padding-bottom: 0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(var(--keyword-row-height) - 1px),
+    var(--keyword-row-line) calc(var(--keyword-row-height) - 1px),
+    var(--keyword-row-line) var(--keyword-row-height)
+  );
+  background-attachment: local;
 }
 
-.keyword-fields-field select {
-  min-height: 140px;
+.keyword-fields-field textarea[readonly] {
+  background-color: var(--panel-strong);
+  color: var(--muted);
+  cursor: default;
 }
 
 label,

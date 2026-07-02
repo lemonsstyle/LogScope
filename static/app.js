@@ -508,17 +508,14 @@ async function loadColumns(table) {
 function populateColumnControls() {
   const timeOptions = [optionNode("", "不限制时间")];
   const visibleOptions = [];
-  const keywordOptions = [];
 
   // Get last selections if available
   const lastSelection = getLastSelection();
   const lastTimeColumn = lastSelection?.timeColumn;
-  const lastKeywordFields = lastSelection?.keywordFields || [];
   let selectedDefaultTimeColumn = false;
 
   for (const item of state.columns) {
     const isLastTimeColumn = item.column_name === lastTimeColumn;
-    const isLastKeywordField = lastKeywordFields.includes(item.column_name);
 
     if (item.is_time_like) {
       const selected = lastTimeColumn ? isLastTimeColumn : !selectedDefaultTimeColumn;
@@ -526,13 +523,14 @@ function populateColumnControls() {
       timeOptions.push(optionNode(item.column_name, item.column_name, selected));
     }
     visibleOptions.push(optionNode(item.column_name, item.column_name, true));
-    const suffix = item.is_text_searchable ? "" : "（非文本）";
-    keywordOptions.push(optionNode(item.column_name, `${item.column_name}${suffix}`, isLastKeywordField));
   }
 
   els.timeColumn.replaceChildren(...timeOptions);
   els.visibleColumns.replaceChildren(...visibleOptions);
-  els.keywordFields.replaceChildren(...keywordOptions);
+  els.keywordFields.value = state.columns
+    .map((item) => item.column_name)
+    .join("\n");
+  syncKeywordTermRows();
   syncVisibleColumnsButton();
 }
 
@@ -556,11 +554,81 @@ function syncVisibleColumnsButton() {
   els.selectAllVisibleColumns.classList.toggle("is-active", allSelected);
 }
 
-function parseKeywordTerms(value) {
+function splitLines(value) {
+  return value.split(/\r?\n/).map((item) => item.trim());
+}
+
+function parseKeywordLine(value) {
   return value
-    .split(/\r?\n/)
+    .split(/[;,，；]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseKeywordFieldTerms(keywordText, fieldText) {
+  const keywordLines = splitLines(keywordText);
+  const fieldLines = splitLines(fieldText);
+  const pairs = [];
+
+  for (let index = 0; index < keywordLines.length; index += 1) {
+    const terms = parseKeywordLine(keywordLines[index] || "");
+    const column = fieldLines[index] || "";
+    if (!terms.length) {
+      continue;
+    }
+    if (terms.length && !column) {
+      throw new Error(`第 ${index + 1} 行关键词缺少对应字段。`);
+    }
+    pairs.push({ column, terms });
+  }
+
+  return pairs;
+}
+
+function syncKeywordTermRows() {
+  const fieldLineCount = splitLines(els.keywordFields.value).length;
+  const keywordLines = els.keywordTerms.value.split(/\r?\n/);
+  const originalLength = keywordLines.length;
+  while (keywordLines.length < fieldLineCount) {
+    keywordLines.push("");
+  }
+  if (keywordLines.length !== originalLength) {
+    els.keywordTerms.value = keywordLines.join("\n");
+  }
+}
+
+function syncKeywordScroll(source, target) {
+  target.scrollTop = source.scrollTop;
+}
+
+function syncKeywordTextareaHeight(source, target) {
+  const height = `${source.getBoundingClientRect().height}px`;
+  if (target.style.height !== height) {
+    target.style.height = height;
+  }
+}
+
+function bindKeywordTextareaResizeSync() {
+  if (typeof ResizeObserver === "undefined") {
+    return;
+  }
+  let syncing = false;
+  const observer = new ResizeObserver((entries) => {
+    if (syncing) {
+      return;
+    }
+    syncing = true;
+    for (const entry of entries) {
+      const source = entry.target;
+      const target = source === els.keywordTerms ? els.keywordFields : els.keywordTerms;
+      syncKeywordTextareaHeight(source, target);
+    }
+    requestAnimationFrame(() => {
+      syncing = false;
+    });
+  });
+  observer.observe(els.keywordTerms);
+  observer.observe(els.keywordFields);
 }
 
 function compactDate(date) {
@@ -755,8 +823,10 @@ function validateSearchPayload(payload) {
   if (!state.selectedSchema || !state.selectedTable) {
     throw new Error("先选择数据库/Schema 和表。");
   }
-  if (payload.keyword_terms.length && payload.keyword_columns.length === 0) {
-    throw new Error("输入关键词时，请至少选择一个关键词字段。");
+  for (const item of payload.keyword_field_terms) {
+    if (!state.columns.some((column) => column.column_name === item.column)) {
+      throw new Error(`关键词字段不存在: ${item.column}`);
+    }
   }
   if (payload.time_column) {
     if (payload.time_mode === "point" && !payload.time_point) {
@@ -819,25 +889,25 @@ async function runSearch(event) {
   requireSession();
   const controller = beginQuery("查询执行中…");
 
-  const payload = {
-    connection_id: state.selectedConnectionId,
-    password: selectedPassword(),
-    schema: state.selectedSchema,
-    table: state.selectedTable,
-    keyword_terms: parseKeywordTerms(els.keywordTerms.value),
-    keyword_columns: selectedValues(els.keywordFields),
-    time_column: els.timeColumn.value,
-    time_mode: els.timeMode.value,
-    time_point: els.timePoint.value.trim(),
-    time_from: els.timeFrom.value.trim(),
-    time_to: els.timeTo.value.trim(),
-    limit: currentLimitValue(),
-    sort_by: els.timeColumn.value,
-    sort_order: "desc",
-    visible_columns: selectedValues(els.visibleColumns),
-  };
-
   try {
+    const payload = {
+      connection_id: state.selectedConnectionId,
+      password: selectedPassword(),
+      schema: state.selectedSchema,
+      table: state.selectedTable,
+      keyword_terms: [],
+      keyword_columns: [],
+      keyword_field_terms: parseKeywordFieldTerms(els.keywordTerms.value, els.keywordFields.value),
+      time_column: els.timeColumn.value,
+      time_mode: els.timeMode.value,
+      time_point: els.timePoint.value.trim(),
+      time_from: els.timeFrom.value.trim(),
+      time_to: els.timeTo.value.trim(),
+      limit: currentLimitValue(),
+      sort_by: els.timeColumn.value,
+      sort_order: "desc",
+      visible_columns: selectedValues(els.visibleColumns),
+    };
     validateSearchPayload(payload);
     const result = await api("/query/search", {
       method: "POST",
@@ -846,8 +916,8 @@ async function runSearch(event) {
       abortMessage: "查询已终止。",
       body: JSON.stringify(payload),
     });
-    const keywordInfo = payload.keyword_terms.length
-      ? ` · 关键词: ${payload.keyword_terms.join(" AND ")} · 字段: ${payload.keyword_columns.join(", ")}`
+    const keywordInfo = payload.keyword_field_terms.length
+      ? ` · 关键词字段: ${payload.keyword_field_terms.map((item) => `${item.column}(${item.terms.join(" OR ")})`).join(" AND ")}`
       : "";
     const timeInfo = result.elapsed_time ? ` · 耗时: ${formatElapsedTime(result.elapsed_time)}` : "";
     const statusMessage = `排序: ${result.applied_sort.column} ${result.applied_sort.order.toUpperCase()} · 上限: ${result.limit}${keywordInfo}${timeInfo}`;
@@ -949,7 +1019,6 @@ function saveLastSelection() {
     schema: state.selectedSchema,
     table: state.selectedTable,
     timeColumn: els.timeColumn.value,
-    keywordFields: selectedValues(els.keywordFields),
   };
   state.lastSelections[state.selectedConnectionId] = selection;
   try {
@@ -1043,7 +1112,10 @@ function bindEvents() {
   els.schemaList.addEventListener("change", (event) => loadTables(event.target.value).catch(handleError));
   els.tableList.addEventListener("change", (event) => loadColumns(event.target.value).catch(handleError));
   els.timeColumn.addEventListener("change", saveLastSelection);
-  els.keywordFields.addEventListener("change", saveLastSelection);
+  els.keywordTerms.addEventListener("input", syncKeywordTermRows);
+  els.keywordTerms.addEventListener("scroll", () => syncKeywordScroll(els.keywordTerms, els.keywordFields));
+  els.keywordFields.addEventListener("scroll", () => syncKeywordScroll(els.keywordFields, els.keywordTerms));
+  bindKeywordTextareaResizeSync();
 
   // Close disclosures when clicking outside
   document.addEventListener("click", (event) => {

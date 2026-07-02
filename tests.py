@@ -369,6 +369,7 @@ class SearchSortTests(unittest.TestCase):
             table="events",
             keyword_terms=["_LIDAR_"],
             keyword_columns=["id", "message"],
+            keyword_field_terms=None,
             time_column="created_at",
             time_mode="range",
             time_point=None,
@@ -398,6 +399,59 @@ class SearchSortTests(unittest.TestCase):
         self.assertEqual(captured["params"][0], "2026-06-06 00:00:00")
         self.assertEqual(captured["params"][-1], 75)
         self.assertEqual(result["applied_sort"], {"column": "created_at", "order": "desc"})
+
+    def test_keyword_field_terms_use_field_specific_groups(self):
+        profile = ConnectionProfile(
+            id="demo",
+            name="demo",
+            host="127.0.0.1",
+            port=3306,
+            username="root",
+            database="logs",
+            database_type="mysql",
+        )
+        gateway = MySQLGateway()
+        gateway.list_columns = lambda *_args, **_kwargs: [
+            {"column_name": "id", "data_type": "int", "is_time_like": False, "is_text_searchable": False},
+            {"column_name": "filename", "data_type": "varchar", "is_time_like": False, "is_text_searchable": True},
+            {"column_name": "sender", "data_type": "varchar", "is_time_like": False, "is_text_searchable": True},
+            {"column_name": "created_at", "data_type": "datetime", "is_time_like": True, "is_text_searchable": False},
+        ]
+        captured = {}
+
+        def fake_fetch_all(_profile, _password, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return [{"filename": "report.csv", "sender": "alice"}], 0.01
+
+        gateway._fetch_all = fake_fetch_all
+        result = gateway.search_rows(
+            profile=profile,
+            password="secret",
+            schema="logs",
+            table="events",
+            keyword_terms=["ignored"],
+            keyword_columns=["id"],
+            keyword_field_terms=[
+                {"column": "filename", "terms": ["report", "summary"]},
+                {"column": "sender", "terms": ["alice"]},
+            ],
+            time_column=None,
+            time_mode="range",
+            time_point=None,
+            time_from=None,
+            time_to=None,
+            limit=50,
+            sort_by="created_at",
+            sort_order="desc",
+            visible_columns=["filename", "sender"],
+        )
+
+        self.assertIn("(`filename` LIKE %s ESCAPE '!' OR `filename` LIKE %s ESCAPE '!')", captured["sql"])
+        self.assertIn("AND (`sender` LIKE %s ESCAPE '!')", captured["sql"])
+        self.assertNotIn("CAST(`id` AS CHAR)", captured["sql"])
+        self.assertEqual(list(captured["params"][:3]), ["%report%", "%summary%", "%alice%"])
+        self.assertEqual(result["keyword_field_terms"][0]["column"], "filename")
 
     def test_postgresql_search_sql(self):
         profile = ConnectionProfile(
@@ -474,6 +528,7 @@ class SearchSortTests(unittest.TestCase):
             table="events",
             keyword_terms=None,
             keyword_columns=None,
+            keyword_field_terms=None,
             time_column=None,
             time_mode="range",
             time_point=None,
