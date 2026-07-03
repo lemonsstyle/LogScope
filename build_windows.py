@@ -2,7 +2,6 @@
 Windows打包脚本 - 使用PyInstaller
 请在Windows上运行此脚本来生成Windows可执行文件
 """
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -79,15 +78,15 @@ def main():
     try:
         subprocess.run(cmd, check=True)
         dist_dir = project_root / "dist" / "LogScope"
-        shutil.copy2(project_root / "Run-LogScope.bat", dist_dir / "Run-LogScope.bat")
         print("\n" + "=" * 60)
         print("✓ 打包成功!")
         print("=" * 60)
         print(f"\n输出目录: {dist_dir}")
         print("\n下一步:")
-        print("1. 测试运行 Run-LogScope.bat")
+        print("1. 测试运行 LogScope.exe")
         print("2. 将整个 LogScope 文件夹复制到Windows电脑")
-        print("3. 使用完成后关闭 Run-LogScope.bat 的控制台窗口")
+        print("3. 用户双击 LogScope.exe 启动，浏览器会自动打开")
+        print("4. 使用完成后关闭 LogScope.exe 的控制台窗口")
     except subprocess.CalledProcessError as e:
         print(f"\n[错误] 打包失败: {e}")
         sys.exit(1)

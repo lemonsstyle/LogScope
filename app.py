@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import ipaddress
 import json
 import mimetypes
 import re
 import secrets
 import sys
+import threading
+import time as time_module
+import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -20,6 +24,7 @@ APP_NAME = "LogScope"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_QUERY_TIMEOUT_SECONDS = 300
+BROWSER_OPEN_DELAY_SECONDS = 1.0
 MAX_LIMIT = 1000
 MAX_SQL_ROWS = 1000
 MAX_JSON_BODY_BYTES = 1_000_000
@@ -1204,6 +1209,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_QUERY_TIMEOUT_SECONDS,
         help="Server-side database read/write timeout in seconds.",
     )
+    parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the browser after the local server starts.",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser automatically.",
+    )
     return parser
 
 
@@ -1212,8 +1227,58 @@ class LogScopeHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
+def configure_windows_console() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.kernel32.SetConsoleTitleW(f"{APP_NAME} - close this window to stop")
+    except Exception:
+        return
+
+
+def is_windows_frozen_app() -> bool:
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def should_open_browser(open_browser: bool, no_browser: bool, frozen_windows: bool | None = None) -> bool:
+    if no_browser:
+        return False
+    if frozen_windows is None:
+        frozen_windows = is_windows_frozen_app()
+    return open_browser or frozen_windows
+
+
+def browser_url_for(host: str, port: int) -> str:
+    normalized = host.strip().lower()
+    if normalized in {"0.0.0.0", "::"}:
+        browser_host = DEFAULT_HOST
+    else:
+        browser_host = host
+    return server_url_for(browser_host, port)
+
+
+def server_url_for(host: str, port: int) -> str:
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        url_host = f"[{host}]"
+    else:
+        url_host = host
+    return f"http://{url_host}:{port}"
+
+
+def open_browser_after_start(url: str, delay_seconds: float = BROWSER_OPEN_DELAY_SECONDS) -> None:
+    def open_url() -> None:
+        time_module.sleep(delay_seconds)
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            print(f"Could not open browser automatically: {exc}")
+
+    threading.Thread(target=open_url, name="browser-launcher", daemon=True).start()
+
+
 def main() -> None:
     args = build_parser().parse_args()
+    configure_windows_console()
     if not args.allow_remote and not is_loopback_host(args.host):
         print("安全限制: 默认只允许绑定 127.0.0.1/localhost。若确需开放局域网，请显式添加 --allow-remote。")
         sys.exit(2)
@@ -1223,9 +1288,15 @@ def main() -> None:
         query_timeout_seconds=max(15, int(args.query_timeout_seconds)),
     )
     server = LogScopeHTTPServer((args.host, args.port), app.make_handler())
-    print(f"{APP_NAME} listening on http://{args.host}:{args.port}")
+    listen_url = server_url_for(args.host, args.port)
+    browser_url = browser_url_for(args.host, args.port)
+    print(f"{APP_NAME} listening on {listen_url}")
     print(f"Data dir: {Path(args.data_dir).resolve()}")
     print(f"Query timeout: {app.query_timeout_seconds}s")
+    if should_open_browser(args.open_browser, args.no_browser):
+        print(f"Opening browser: {browser_url}")
+        print("Close this window to stop LogScope.")
+        open_browser_after_start(browser_url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

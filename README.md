@@ -72,10 +72,10 @@ dist\LogScope
 把整个 `dist\LogScope` 文件夹复制到目标 Windows 电脑，然后运行：
 
 ```text
-Run-LogScope.bat
+LogScope.exe
 ```
 
-浏览器会自动打开 `http://127.0.0.1:8765`。使用完成后关闭这个控制台窗口即可停止服务。
+浏览器会自动打开 `http://127.0.0.1:8765`。使用完成后关闭 `LogScope.exe` 的控制台窗口即可停止服务。
 
 ## 常用参数
 

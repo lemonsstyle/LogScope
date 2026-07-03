@@ -72,10 +72,10 @@ dist\LogScope
 Copy the entire `dist\LogScope` folder to the target Windows computer, then run:
 
 ```text
-Run-LogScope.bat
+LogScope.exe
 ```
 
-The browser opens `http://127.0.0.1:8765` automatically. Close the console window when you are done to stop the service.
+The browser opens `http://127.0.0.1:8765` automatically. Close the `LogScope.exe` console window when you are done to stop the service.
 
 ## Common Options
 

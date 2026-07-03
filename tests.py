@@ -13,6 +13,7 @@ from app import (
     MySQLGateway,
     PostgreSQLGateway,
     SQLServerGateway,
+    browser_url_for,
     escape_like_literal,
     is_loopback_host,
     json_default,
@@ -20,6 +21,7 @@ from app import (
     normalize_time_input,
     normalize_time_point,
     parse_readonly_sql,
+    should_open_browser,
 )
 from datetime import datetime
 
@@ -151,6 +153,17 @@ class ApplicationTests(unittest.TestCase):
         self.assertTrue(is_loopback_host("127.0.0.1"))
         self.assertTrue(is_loopback_host("localhost"))
         self.assertFalse(is_loopback_host("0.0.0.0"))
+
+    def test_packaged_windows_exe_opens_browser_by_default(self):
+        self.assertTrue(should_open_browser(False, False, frozen_windows=True))
+        self.assertFalse(should_open_browser(False, False, frozen_windows=False))
+        self.assertTrue(should_open_browser(True, False, frozen_windows=False))
+        self.assertFalse(should_open_browser(True, True, frozen_windows=True))
+
+    def test_browser_url_uses_reachable_loopback_host(self):
+        self.assertEqual(browser_url_for("127.0.0.1", 8765), "http://127.0.0.1:8765")
+        self.assertEqual(browser_url_for("0.0.0.0", 8765), "http://127.0.0.1:8765")
+        self.assertEqual(browser_url_for("::1", 8765), "http://[::1]:8765")
 
     def test_database_error_redacts_password(self):
         gateway = MySQLGateway.__new__(MySQLGateway)
