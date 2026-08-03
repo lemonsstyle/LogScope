@@ -2,17 +2,21 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app import (
     Application,
     AppError,
     ConnectionProfile,
     ConnectionStore,
+    DatabaseGateway,
     GatewayResolver,
     MAX_SQL_ROWS,
     MySQLGateway,
+    OracleGateway,
     PostgreSQLGateway,
     SQLServerGateway,
+    XuguGateway,
     browser_url_for,
     escape_like_literal,
     is_loopback_host,
@@ -20,35 +24,52 @@ from app import (
     normalize_keyword_terms,
     normalize_time_input,
     normalize_time_point,
-    parse_readonly_sql,
+    parse_sql_statement,
     should_open_browser,
 )
 from datetime import datetime
 
 
-class ReadonlySqlTests(unittest.TestCase):
-    def test_accepts_select(self):
-        self.assertEqual(parse_readonly_sql("SELECT * FROM logs"), "SELECT * FROM logs")
+class SqlStatementTests(unittest.TestCase):
+    def test_accepts_read_and_write_statements(self):
+        statements = (
+            "SELECT * FROM logs",
+            "INSERT INTO logs(id) VALUES (1)",
+            "UPDATE logs SET status = 'done' WHERE id = 1",
+            "DELETE FROM logs WHERE id = 1",
+            "CREATE TABLE logs_copy(id INT)",
+            "ALTER TABLE logs_copy ADD status VARCHAR(20)",
+            "TRUNCATE TABLE logs_copy",
+            "DROP TABLE logs_copy",
+            "GRANT SELECT ON logs TO analyst",
+            "CALL refresh_logs()",
+        )
+        for statement in statements:
+            with self.subTest(statement=statement):
+                self.assertEqual(parse_sql_statement(statement), statement)
 
-    def test_rejects_mutation(self):
-        with self.assertRaisesRegex(Exception, "只允许执行 SELECT 查询"):
-            parse_readonly_sql("DELETE FROM logs")
+    def test_allows_one_trailing_semicolon(self):
+        self.assertEqual(parse_sql_statement("UPDATE logs SET status = 'done';"), "UPDATE logs SET status = 'done'")
 
     def test_rejects_multi_statement(self):
-        with self.assertRaisesRegex(Exception, "只允许单条 SELECT 语句"):
-            parse_readonly_sql("SELECT 1; SELECT 2")
+        with self.assertRaisesRegex(Exception, "只允许执行单条 SQL 语句"):
+            parse_sql_statement("SELECT 1; DELETE FROM logs")
 
     def test_rejects_select_into_outfile(self):
-        with self.assertRaisesRegex(Exception, "高风险"):
-            parse_readonly_sql("SELECT * FROM logs INTO OUTFILE '/tmp/logs.txt'")
+        with self.assertRaisesRegex(Exception, "服务器文件"):
+            parse_sql_statement("SELECT * FROM logs INTO OUTFILE '/tmp/logs.txt'")
 
     def test_rejects_sleep_function(self):
-        with self.assertRaisesRegex(Exception, "高风险"):
-            parse_readonly_sql("SELECT SLEEP(10)")
+        with self.assertRaisesRegex(Exception, "阻塞表达式"):
+            parse_sql_statement("SELECT SLEEP(10)")
 
     def test_rejects_postgresql_sleep_function(self):
-        with self.assertRaisesRegex(Exception, "高风险"):
-            parse_readonly_sql("SELECT pg_sleep(10)")
+        with self.assertRaisesRegex(Exception, "阻塞表达式"):
+            parse_sql_statement("SELECT pg_sleep(10)")
+
+    def test_rejects_server_system_command(self):
+        with self.assertRaisesRegex(Exception, "系统命令"):
+            parse_sql_statement("EXEC xp_cmdshell 'dir'")
 
 
 class SearchHelperTests(unittest.TestCase):
@@ -185,6 +206,22 @@ class ApplicationTests(unittest.TestCase):
         self.assertNotIn("secret", context.exception.details)
         self.assertIn("******", context.exception.details)
 
+    def test_new_database_types_use_default_ports(self):
+        app = Application.__new__(Application)
+        cases = (("oracle", 1521), ("xugu", 5138))
+        for database_type, expected_port in cases:
+            with self.subTest(database_type=database_type):
+                data = app._normalize_profile_payload(
+                    {
+                        "name": database_type,
+                        "host": "127.0.0.1",
+                        "username": "tester",
+                        "database": "logs",
+                        "database_type": database_type,
+                    }
+                )
+                self.assertEqual(data["port"], expected_port)
+
 
 class FakeGateway:
     def __init__(self, database_type, should_fail=False):
@@ -270,18 +307,80 @@ class GatewayResolverTests(unittest.TestCase):
         self.assertIn("SQL Server", context.exception.details)
         self.assertNotIn("secret", context.exception.details)
 
+    def test_auto_recognizes_oracle_and_xugu_standard_ports(self):
+        cases = (("oracle", 1521), ("xugu", 5138))
+        for database_type, port in cases:
+            with self.subTest(database_type=database_type):
+                gateway = FakeGateway(database_type)
+                resolver = GatewayResolver(gateways={database_type: gateway})
+                profile = ConnectionProfile(
+                    id=database_type,
+                    name=database_type,
+                    host="127.0.0.1",
+                    port=port,
+                    username="tester",
+                    database="logs",
+                    database_type="auto",
+                )
+                resolved_type, resolved_gateway = resolver.resolve_gateway(profile, "secret")
+                self.assertEqual(resolved_type, database_type)
+                self.assertIs(resolved_gateway, gateway)
+                self.assertEqual(gateway.calls, 0)
+
 
 class DialectTests(unittest.TestCase):
     def test_dialect_fragments(self):
         self.assertEqual(MySQLGateway().table_reference("logs", "events"), "`logs`.`events`")
         self.assertEqual(PostgreSQLGateway().table_reference("public", "events"), '"public"."events"')
         self.assertEqual(SQLServerGateway().table_reference("dbo", "events"), "[dbo].[events]")
+        self.assertEqual(OracleGateway().table_reference("APP", "EVENTS"), '"APP"."EVENTS"')
+        self.assertEqual(XuguGateway().table_reference("APP", "EVENTS"), '"APP"."EVENTS"')
         self.assertEqual(MySQLGateway().text_cast("`id`"), "CAST(`id` AS CHAR)")
         self.assertEqual(PostgreSQLGateway().text_cast('"id"'), 'CAST("id" AS TEXT)')
         self.assertEqual(SQLServerGateway().text_cast("[id]"), "CAST([id] AS NVARCHAR(MAX))")
+        self.assertEqual(OracleGateway().text_cast('"id"'), 'CAST("id" AS VARCHAR2(4000))')
+        self.assertEqual(XuguGateway().text_cast('"id"'), 'CAST("id" AS VARCHAR)')
         self.assertEqual(MySQLGateway().limit_clause(), " LIMIT %s")
         self.assertEqual(PostgreSQLGateway().limit_clause(), " LIMIT %s")
         self.assertEqual(SQLServerGateway().limit_clause(), " OFFSET 0 ROWS FETCH NEXT %s ROWS ONLY")
+        self.assertEqual(OracleGateway().bind_placeholder(3), ":3")
+        self.assertEqual(XuguGateway().bind_placeholder(3), "?")
+
+    def test_oracle_and_xugu_rownum_limits(self):
+        oracle_sql, oracle_params = OracleGateway().apply_limit("SELECT * FROM events", ("term",), 50)
+        self.assertEqual(oracle_sql, "SELECT * FROM (SELECT * FROM events) WHERE ROWNUM <= :2")
+        self.assertEqual(oracle_params, ("term", 50))
+
+        xugu_sql, xugu_params = XuguGateway().apply_limit("SELECT * FROM events", ("term",), 50)
+        self.assertEqual(xugu_sql, "SELECT * FROM (SELECT * FROM events) WHERE ROWNUM <= ?")
+        self.assertEqual(xugu_params, ("term", 50))
+
+    def test_tuple_rows_use_cursor_description(self):
+        rows = OracleGateway()._rows_to_dicts([(1, "ok")], [("ID",), ("MESSAGE",)])
+        self.assertEqual(rows, [{"ID": 1, "MESSAGE": "ok"}])
+
+    def test_oracle_metadata_queries(self):
+        gateway = OracleGateway()
+        table_sql, table_params = gateway.list_tables_query("app")
+        column_sql, column_params = gateway.list_columns_query("app", "events")
+        self.assertIn("all_tables", table_sql)
+        self.assertIn("all_views", table_sql)
+        self.assertIn("owner = :1", table_sql)
+        self.assertEqual(table_params, ("APP", "APP"))
+        self.assertIn("all_tab_columns", column_sql)
+        self.assertEqual(column_params, ("APP", "EVENTS"))
+
+    def test_xugu_metadata_queries(self):
+        gateway = XuguGateway()
+        schema_sql, schema_params = gateway.list_schemas_query()
+        table_sql, table_params = gateway.list_tables_query("app")
+        column_sql, column_params = gateway.list_columns_query("app", "events")
+        self.assertIn("all_schemas", schema_sql)
+        self.assertEqual(schema_params, ())
+        self.assertIn("all_tables", table_sql)
+        self.assertEqual(table_params, ("APP",))
+        self.assertIn("all_columns", column_sql)
+        self.assertEqual(column_params, ("APP", "EVENTS"))
 
     def test_postgresql_metadata_queries(self):
         gateway = PostgreSQLGateway()
@@ -337,6 +436,87 @@ class DialectTests(unittest.TestCase):
         self.assertIn("information_schema.tables", captured["sql"])
         self.assertEqual(captured["params"], ("dbo",))
         self.assertEqual(tables[0]["table_name"], "events")
+
+
+class NewDriverConnectionTests(unittest.TestCase):
+    def test_oracle_connect_uses_service_name_and_timeout(self):
+        class FakeConnection:
+            call_timeout = 0
+            autocommit = False
+
+        class FakeDriver:
+            def __init__(self):
+                self.dsn_args = None
+                self.connect_kwargs = None
+
+            def makedsn(self, host, port, service_name):
+                self.dsn_args = (host, port, service_name)
+                return "oracle-dsn"
+
+            def connect(self, **kwargs):
+                self.connect_kwargs = kwargs
+                return FakeConnection()
+
+        fake_driver = FakeDriver()
+        profile = ConnectionProfile(
+            id="oracle",
+            name="oracle",
+            host="db.example.com",
+            port=1521,
+            username="app",
+            database="ORCLPDB1",
+            database_type="oracle",
+        )
+        with patch("app.ORACLE_DRIVER", fake_driver):
+            conn = OracleGateway(query_timeout_seconds=12).connect(profile, "secret")
+        self.assertEqual(fake_driver.dsn_args, ("db.example.com", 1521, "ORCLPDB1"))
+        self.assertEqual(
+            fake_driver.connect_kwargs,
+            {"user": "app", "password": "secret", "dsn": "oracle-dsn"},
+        )
+        self.assertEqual(conn.call_timeout, 12000)
+        self.assertTrue(conn.autocommit)
+
+    def test_xugu_connect_uses_vendor_driver_arguments(self):
+        class FakeConnection:
+            def __init__(self):
+                self.autocommit_value = None
+
+            def autocommit(self, value):
+                self.autocommit_value = value
+
+        class FakeDriver:
+            def __init__(self):
+                self.connect_kwargs = None
+
+            def connect(self, **kwargs):
+                self.connect_kwargs = kwargs
+                return FakeConnection()
+
+        fake_driver = FakeDriver()
+        profile = ConnectionProfile(
+            id="xugu",
+            name="xugu",
+            host="db.example.com",
+            port=5138,
+            username="SYSDBA",
+            database="SYSTEM",
+            database_type="xugu",
+        )
+        with patch("app.XUGU_DRIVER", fake_driver):
+            conn = XuguGateway().connect(profile, "secret")
+        self.assertEqual(
+            fake_driver.connect_kwargs,
+            {
+                "host": "db.example.com",
+                "port": 5138,
+                "database": "SYSTEM",
+                "user": "SYSDBA",
+                "password": "secret",
+                "charset": "UTF8",
+            },
+        )
+        self.assertTrue(conn.autocommit_value)
 
 
 class SearchSortTests(unittest.TestCase):
@@ -496,6 +676,41 @@ class SearchSortTests(unittest.TestCase):
         self.assertIn("CAST([id] AS NVARCHAR(MAX)) LIKE %s", captured["sql"])
         self.assertIn("ORDER BY [created_at] DESC OFFSET 0 ROWS FETCH NEXT %s ROWS ONLY", captured["sql"])
 
+    def test_oracle_search_sql(self):
+        profile = ConnectionProfile(
+            id="oracle",
+            name="oracle",
+            host="127.0.0.1",
+            port=1521,
+            username="app",
+            database="ORCLPDB1",
+            database_type="oracle",
+        )
+        captured, _result = self._run_search_for_gateway(OracleGateway(), profile)
+        self.assertIn('FROM "logs"."events"', captured["sql"])
+        self.assertIn('"created_at" >= :1', captured["sql"])
+        self.assertIn('CAST("id" AS VARCHAR2(4000)) LIKE :2', captured["sql"])
+        self.assertIn('"message" LIKE :3', captured["sql"])
+        self.assertTrue(captured["sql"].startswith("SELECT * FROM ("))
+        self.assertIn(") WHERE ROWNUM <= :4", captured["sql"])
+
+    def test_xugu_search_sql(self):
+        profile = ConnectionProfile(
+            id="xugu",
+            name="xugu",
+            host="127.0.0.1",
+            port=5138,
+            username="SYSDBA",
+            database="SYSTEM",
+            database_type="xugu",
+        )
+        captured, _result = self._run_search_for_gateway(XuguGateway(), profile)
+        self.assertIn('FROM "logs"."events"', captured["sql"])
+        self.assertIn('CAST("id" AS VARCHAR) LIKE ?', captured["sql"])
+        self.assertIn('ORDER BY "created_at" DESC', captured["sql"])
+        self.assertTrue(captured["sql"].startswith("SELECT * FROM ("))
+        self.assertIn(") WHERE ROWNUM <= ?", captured["sql"])
+
     def test_defaults_to_time_column_desc_sort(self):
         gateway = MySQLGateway.__new__(MySQLGateway)
         gateway.list_columns = lambda *_args, **_kwargs: [
@@ -557,17 +772,38 @@ class SearchSortTests(unittest.TestCase):
         self.assertEqual(captured["params"][-1], 100)
         self.assertEqual(result["applied_sort"], {"column": "created_at", "order": "desc"})
 
-    def test_readonly_sql_uses_limited_fetch(self):
-        gateway = MySQLGateway.__new__(MySQLGateway)
-        captured = {}
+    def test_advanced_select_uses_limited_fetch(self):
+        class FakeCursor:
+            description = [("id",)]
+            rowcount = 2
 
-        def fake_fetch_limited(_profile, _password, sql, params, max_rows):
-            captured["sql"] = sql
-            captured["params"] = params
-            captured["max_rows"] = max_rows
-            return [{"id": 1}], 0.01, ["id"], True
+            def __init__(self):
+                self.sql = None
+                self.fetch_size = None
 
-        gateway._fetch_limited = fake_fetch_limited
+            def execute(self, sql):
+                self.sql = sql
+
+            def fetchmany(self, size):
+                self.fetch_size = size
+                return [(1,), (2,)]
+
+            def close(self):
+                pass
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_instance = FakeCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def close(self):
+                pass
+
+        gateway = DatabaseGateway()
+        connection = FakeConnection()
+        gateway.connect = lambda _profile, _password: connection
         profile = ConnectionProfile(
             id="demo",
             name="demo",
@@ -577,13 +813,60 @@ class SearchSortTests(unittest.TestCase):
             database="logs",
         )
 
-        result = MySQLGateway.execute_readonly_sql(gateway, profile, "secret", "SELECT * FROM logs")
+        result = gateway.execute_sql(profile, "secret", "SELECT * FROM logs")
 
-        self.assertEqual(captured["sql"], "SELECT * FROM logs")
-        self.assertEqual(captured["params"], ())
-        self.assertEqual(captured["max_rows"], MAX_SQL_ROWS)
-        self.assertTrue(result["truncated"])
+        self.assertEqual(connection.cursor_instance.sql, "SELECT * FROM logs")
+        self.assertEqual(connection.cursor_instance.fetch_size, MAX_SQL_ROWS + 1)
+        self.assertTrue(result["has_result_set"])
+        self.assertEqual(result["statement_type"], "SELECT")
         self.assertEqual(result["columns"], ["id"])
+        self.assertEqual(result["rows"], [{"id": 1}, {"id": 2}])
+        self.assertFalse(result["truncated"])
+
+    def test_advanced_update_returns_affected_rows(self):
+        class FakeCursor:
+            description = None
+            rowcount = 3
+
+            def __init__(self):
+                self.sql = None
+
+            def execute(self, sql):
+                self.sql = sql
+
+            def close(self):
+                pass
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_instance = FakeCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def close(self):
+                pass
+
+        gateway = DatabaseGateway()
+        connection = FakeConnection()
+        gateway.connect = lambda _profile, _password: connection
+        profile = ConnectionProfile(
+            id="demo",
+            name="demo",
+            host="127.0.0.1",
+            port=3306,
+            username="root",
+            database="logs",
+        )
+
+        result = gateway.execute_sql(profile, "secret", "UPDATE logs SET status = 'done'")
+
+        self.assertEqual(connection.cursor_instance.sql, "UPDATE logs SET status = 'done'")
+        self.assertFalse(result["has_result_set"])
+        self.assertEqual(result["statement_type"], "UPDATE")
+        self.assertEqual(result["affected_rows"], 3)
+        self.assertEqual(result["columns"], [])
+        self.assertEqual(result["rows"], [])
 
 
 if __name__ == "__main__":

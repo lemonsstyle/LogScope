@@ -26,11 +26,15 @@ const DATABASE_TYPE_LABELS = {
   mysql: "MySQL",
   postgresql: "PostgreSQL",
   sqlserver: "SQL Server",
+  oracle: "Oracle",
+  xugu: "虚谷数据库",
 };
 const DATABASE_TYPE_DEFAULT_PORTS = {
   mysql: "3306",
   postgresql: "5432",
   sqlserver: "1433",
+  oracle: "1521",
+  xugu: "5138",
 };
 const DEFAULT_PORT_VALUES = new Set(Object.values(DATABASE_TYPE_DEFAULT_PORTS));
 
@@ -750,7 +754,7 @@ function renderResults(columns, rows, options = {}) {
   if (!rows.length) {
     thead.innerHTML = "";
     tbody.innerHTML = "";
-    setFeedback(els.resultsState, "查询完成，但没有匹配结果。");
+    setFeedback(els.resultsState, options.statusMessage || "查询完成，但没有匹配结果。", options.statusMessage ? "ok" : "");
     els.resultsMeta.textContent = "";
     return;
   }
@@ -957,24 +961,32 @@ async function runSql() {
   };
 
   try {
-    const result = await api("/query/sql-readonly", {
+    const result = await api("/query/sql", {
       method: "POST",
       timeoutMs: state.queryTimeout,
       signal: controller.signal,
       abortMessage: "查询已终止。",
       body: JSON.stringify(payload),
     });
+    const statementType = result.statement_type || "SQL";
     const timeInfo = result.elapsed_time ? ` · 耗时: ${formatElapsedTime(result.elapsed_time)}` : "";
     const truncationInfo = result.truncated ? ` · 已截断到 ${result.limit} 行` : "";
-    const statusMessage = `高级 SQL 结果${timeInfo}${truncationInfo}`;
 
     // Clear the meta line (second line)
     els.resultsMeta.textContent = "";
 
-    renderResultsResponsive(result.columns, result.rows, {
-      resetSort: true,
-      statusMessage: statusMessage
-    });
+    if (result.has_result_set) {
+      const statusMessage = `${statementType} 执行完成 · 返回 ${result.rows.length} 行${timeInfo}${truncationInfo}`;
+      renderResultsResponsive(result.columns, result.rows, {
+        resetSort: true,
+        statusMessage: statusMessage
+      });
+      setFeedback(els.resultsState, statusMessage, "ok");
+    } else {
+      clearResultsView();
+      const affectedInfo = Number.isInteger(result.affected_rows) ? ` · 影响 ${result.affected_rows} 行` : "";
+      setFeedback(els.resultsState, `${statementType} 执行成功${affectedInfo}${timeInfo}`, "ok");
+    }
 
     // Show success state briefly
     els.resultsState.classList.add('is-success');

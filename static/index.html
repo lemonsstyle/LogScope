@@ -50,6 +50,8 @@
                   <option value="mysql">MySQL</option>
                   <option value="postgresql">PostgreSQL</option>
                   <option value="sqlserver">SQL Server</option>
+                  <option value="oracle">Oracle</option>
+                  <option value="xugu">虚谷数据库</option>
                 </select>
               </label>
               <label>
@@ -69,8 +71,8 @@
                 <input id="password" name="password" type="password" placeholder="仅用于测试和当前查询，不保存">
               </label>
               <label>
-                <span>默认数据库</span>
-                <input id="database" name="database" placeholder="logs">
+                <span>默认数据库/服务名</span>
+                <input id="database" name="database" placeholder="logs / ORCLPDB1">
               </label>
             </form>
             <div id="connectionFeedback" class="inline-feedback" aria-live="polite"></div>
@@ -220,12 +222,16 @@
 
         <section id="sqlPanel" class="sql-panel hidden">
           <div class="sql-mode-banner">SQL 模式已开启，表单筛选已暂时隐藏。</div>
+          <div class="sql-write-warning" role="alert">
+            <strong>高风险：此处可以修改数据库内容和结构。</strong>
+            <span>允许执行单条查询、增删改、建表、删表、授权及调用存储过程等 SQL。语句会使用当前连接账号的权限执行，写操作可能立即生效且无法撤销，请确认目标数据库和备份后再执行。</span>
+          </div>
           <label>
-            <span>只读 SQL</span>
-            <textarea id="sqlEditor" rows="6" placeholder="SELECT * FROM your_table ORDER BY created_at DESC LIMIT 100"></textarea>
+            <span>高级 SQL（单条）</span>
+            <textarea id="sqlEditor" rows="6" placeholder="SELECT * FROM your_table; 或 UPDATE your_table SET status = 'done' WHERE id = 1"></textarea>
           </label>
           <div class="actions">
-            <button id="runSqlButton" type="button">执行 SQL</button>
+            <button id="runSqlButton" type="button" class="danger">执行 SQL</button>
             <button type="button" class="ghost danger cancel-query-button hidden">终止查询</button>
           </div>
         </section>

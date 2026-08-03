@@ -50,10 +50,14 @@ TEXT_SEARCH_TYPES = {
     "ntext",
     "nvarchar",
     "varchar",
+    "varchar2",
+    "nvarchar2",
     "tinytext",
     "text",
     "mediumtext",
     "longtext",
+    "clob",
+    "nclob",
     "enum",
     "set",
     "uuid",
@@ -62,32 +66,33 @@ TEXT_SEARCH_TYPES = {
     "jsonb",
     "xml",
 }
-READONLY_SQL_PATTERN = re.compile(r"^\s*select\b", re.IGNORECASE)
-FORBIDDEN_SQL_PATTERN = re.compile(
-    r"\b(insert|update|delete|replace|alter|drop|truncate|create|rename|grant|revoke|call|use|set)\b",
-    re.IGNORECASE,
-)
-DANGEROUS_READONLY_SQL_PATTERN = re.compile(
+DANGEROUS_SQL_PATTERN = re.compile(
     r"\binto\s+(?:out|dump)file\b"
     r"|\b(?:load_file|sleep|pg_sleep|benchmark|get_lock|release_lock|is_free_lock|is_used_lock)\s*\("
-    r"|\b(?:pg_read_file|pg_ls_dir|pg_stat_file|xp_cmdshell|openrowset|opendatasource)\s*\("
-    r"|\bwaitfor\b"
-    r"|\bfor\s+update\b"
-    r"|\block\s+in\s+share\s+mode\b",
+    r"|\b(?:pg_read_file|pg_ls_dir|pg_stat_file|openrowset|opendatasource)\s*\("
+    r"|\b(?:xp_cmdshell|utl_file|dbms_scheduler|dbms_java)\b"
+    r"|\b(?:bulk\s+insert|load\s+data)\b"
+    r"|\bcopy\b[\s\S]*\b(?:from|to)\s+(?:program\b|')"
+    r"|\bwaitfor\b",
     re.IGNORECASE,
 )
+SQL_STATEMENT_TYPE_PATTERN = re.compile(r"^\s*([A-Za-z]+)")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
-DATABASE_TYPES = {"auto", "mysql", "postgresql", "sqlserver"}
+DATABASE_TYPES = {"auto", "mysql", "postgresql", "sqlserver", "oracle", "xugu"}
 DEFAULT_DATABASE_PORTS = {
     "mysql": 3306,
     "postgresql": 5432,
     "sqlserver": 1433,
+    "oracle": 1521,
+    "xugu": 5138,
 }
-AUTO_PROBE_ORDER = ("mysql", "postgresql", "sqlserver")
+AUTO_PROBE_ORDER = ("mysql", "postgresql", "sqlserver", "oracle", "xugu")
 DATABASE_TYPE_LABELS = {
     "mysql": "MySQL",
     "postgresql": "PostgreSQL",
     "sqlserver": "SQL Server",
+    "oracle": "Oracle",
+    "xugu": "虚谷数据库",
 }
 
 
@@ -121,8 +126,26 @@ def _load_sqlserver_driver():
         return None, None
 
 
+def _load_oracle_driver():
+    try:
+        module = __import__("oracledb", fromlist=["*"])
+        return "oracledb", module
+    except ImportError:
+        return None, None
+
+
+def _load_xugu_driver():
+    try:
+        module = __import__("xgcondb", fromlist=["*"])
+        return "xgcondb", module
+    except ImportError:
+        return None, None
+
+
 POSTGRES_DRIVER_NAME, POSTGRES_DRIVER, POSTGRES_DICT_ROW = _load_postgresql_driver()
 SQLSERVER_DRIVER_NAME, SQLSERVER_DRIVER = _load_sqlserver_driver()
+ORACLE_DRIVER_NAME, ORACLE_DRIVER = _load_oracle_driver()
+XUGU_DRIVER_NAME, XUGU_DRIVER = _load_xugu_driver()
 
 
 class AppError(Exception):
@@ -179,19 +202,20 @@ def is_text_searchable(data_type: str) -> bool:
     return data_type.lower() in TEXT_SEARCH_TYPES
 
 
-def parse_readonly_sql(sql: str) -> str:
+def parse_sql_statement(sql: str) -> str:
     stripped = sql.strip()
     if not stripped:
         raise AppError("SQL 不能为空。", 400)
     if ";" in stripped.rstrip(";"):
-        raise AppError("只允许单条 SELECT 语句。", 400)
-    if not READONLY_SQL_PATTERN.match(stripped):
-        raise AppError("只允许执行 SELECT 查询。", 400)
-    if FORBIDDEN_SQL_PATTERN.search(stripped):
-        raise AppError("SQL 包含不允许的关键字。", 400)
-    if DANGEROUS_READONLY_SQL_PATTERN.search(stripped):
-        raise AppError("SQL 包含不允许的只读高风险表达式。", 400)
+        raise AppError("只允许执行单条 SQL 语句。", 400)
+    if DANGEROUS_SQL_PATTERN.search(stripped):
+        raise AppError("SQL 包含不允许的服务器文件、系统命令或阻塞表达式。", 400)
     return stripped.rstrip(";")
+
+
+def sql_statement_type(sql: str) -> str:
+    match = SQL_STATEMENT_TYPE_PATTERN.match(sql)
+    return match.group(1).upper() if match else "SQL"
 
 
 def escape_like_literal(value: str) -> str:
@@ -391,6 +415,9 @@ class DatabaseGateway:
     def _cursor(self, conn, unbuffered: bool = False):
         return conn.cursor()
 
+    def bind_placeholder(self, position: int) -> str:
+        return "%s"
+
     def quote_identifier(self, name: str) -> str:
         ensure_identifier(name, "标识符")
         return f'"{name}"'
@@ -403,8 +430,12 @@ class DatabaseGateway:
     def text_cast(self, expression: str) -> str:
         return f"CAST({expression} AS {self.text_cast_type})"
 
-    def limit_clause(self) -> str:
-        return " LIMIT %s"
+    def limit_clause(self, parameter_index: int = 1) -> str:
+        return f" LIMIT {self.bind_placeholder(parameter_index)}"
+
+    def apply_limit(self, sql: str, params: tuple[Any, ...], limit: int) -> tuple[str, tuple[Any, ...]]:
+        parameter_index = len(params) + 1
+        return sql + self.limit_clause(parameter_index), (*params, limit)
 
     def current_database_query(self) -> str:
         raise NotImplementedError
@@ -421,11 +452,12 @@ class DatabaseGateway:
 
     def list_tables_query(self, schema: str) -> tuple[str, tuple[Any, ...]]:
         ensure_identifier(schema, "数据库/Schema 名")
+        schema_placeholder = self.bind_placeholder(1)
         return (
-            """
+            f"""
             SELECT table_name, table_type
             FROM information_schema.tables
-            WHERE table_schema = %s
+            WHERE table_schema = {schema_placeholder}
             ORDER BY table_name
             """,
             (schema,),
@@ -434,11 +466,13 @@ class DatabaseGateway:
     def list_columns_query(self, schema: str, table: str) -> tuple[str, tuple[Any, ...]]:
         ensure_identifier(schema, "数据库/Schema 名")
         ensure_identifier(table, "表名")
+        schema_placeholder = self.bind_placeholder(1)
+        table_placeholder = self.bind_placeholder(2)
         return (
-            """
+            f"""
             SELECT column_name, data_type, data_type AS column_type, is_nullable
             FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s
+            WHERE table_schema = {schema_placeholder} AND table_name = {table_placeholder}
             ORDER BY ordinal_position
             """,
             (schema, table),
@@ -451,10 +485,13 @@ class DatabaseGateway:
             try:
                 cursor = self._cursor(conn)
                 cursor.execute(self.current_database_query())
-                row = cursor.fetchone() or {}
-                if not isinstance(row, Mapping):
-                    row = dict(row)
-                return {"ok": True, "database": row.get("current_database"), "version": row.get("version")}
+                raw_row = cursor.fetchone()
+                row = self._row_to_dict(raw_row, cursor.description) if raw_row is not None else {}
+                return {
+                    "ok": True,
+                    "database": self._row_value(row, "current_database"),
+                    "version": self._row_value(row, "version"),
+                }
             finally:
                 if cursor:
                     close_quietly(cursor)
@@ -467,21 +504,40 @@ class DatabaseGateway:
     def list_schemas(self, profile: ConnectionProfile, password: str | None) -> list[str]:
         sql, params = self.list_schemas_query()
         rows, _ = self._fetch_all(profile, password, sql, params)
-        return [row["schema_name"] for row in rows]
+        return [str(value) for row in rows if (value := self._row_value(row, "schema_name")) is not None]
 
     def list_tables(self, profile: ConnectionProfile, password: str | None, schema: str) -> list[dict[str, Any]]:
         sql, params = self.list_tables_query(schema)
         rows, _ = self._fetch_all(profile, password, sql, params)
-        return rows
+        return [
+            {
+                "table_name": self._row_value(row, "table_name"),
+                "table_type": self._row_value(row, "table_type"),
+            }
+            for row in rows
+            if self._row_value(row, "table_name") is not None
+        ]
 
     def list_columns(self, profile: ConnectionProfile, password: str | None, schema: str, table: str) -> list[dict[str, Any]]:
         sql, params = self.list_columns_query(schema, table)
         rows, _ = self._fetch_all(profile, password, sql, params)
+        columns: list[dict[str, Any]] = []
         for row in rows:
-            row["column_type"] = row.get("column_type") or row.get("data_type") or ""
-            row["is_time_like"] = is_time_like(str(row["column_name"]), str(row["data_type"]))
-            row["is_text_searchable"] = is_text_searchable(str(row["data_type"]))
-        return rows
+            column_name = self._row_value(row, "column_name")
+            if column_name is None:
+                continue
+            data_type = self._row_value(row, "data_type") or ""
+            column_type = self._row_value(row, "column_type") or data_type
+            normalized_row = {
+                "column_name": str(column_name),
+                "data_type": str(data_type),
+                "column_type": str(column_type),
+                "is_nullable": self._row_value(row, "is_nullable"),
+            }
+            normalized_row["is_time_like"] = is_time_like(normalized_row["column_name"], normalized_row["data_type"])
+            normalized_row["is_text_searchable"] = is_text_searchable(normalized_row["data_type"])
+            columns.append(normalized_row)
+        return columns
 
     def search_rows(
         self,
@@ -516,6 +572,24 @@ class DatabaseGateway:
         where_parts: list[str] = []
         params: list[Any] = []
 
+        if time_column:
+            if time_column not in column_map:
+                raise AppError("时间列不存在。", 400)
+            normalized_from: str | None
+            normalized_to: str | None
+            if (time_mode or "range") == "point":
+                normalized_from, normalized_to = normalize_time_point(time_point)
+            else:
+                normalized_from = normalize_time_input(time_from, "start")
+                normalized_to = normalize_time_input(time_to, "end")
+
+            if normalized_from:
+                where_parts.append(f"{self.quote_identifier(time_column)} >= {self.bind_placeholder(len(params) + 1)}")
+                params.append(normalized_from)
+            if normalized_to:
+                where_parts.append(f"{self.quote_identifier(time_column)} <= {self.bind_placeholder(len(params) + 1)}")
+                params.append(normalized_to)
+
         normalized_keyword_field_terms = keyword_field_terms or []
         if normalized_keyword_field_terms:
             invalid_keyword_columns = [item["column"] for item in normalized_keyword_field_terms if item["column"] not in column_map]
@@ -530,7 +604,7 @@ class DatabaseGateway:
                 like_parts: list[str] = []
                 for term in item["terms"]:
                     escaped_term = escape_like_literal(term)
-                    like_parts.append(f"{expression} LIKE %s ESCAPE '!'")
+                    like_parts.append(f"{expression} LIKE {self.bind_placeholder(len(params) + 1)} ESCAPE '!'")
                     params.append(f"%{escaped_term}%")
                 where_parts.append("(" + " OR ".join(like_parts) + ")")
 
@@ -553,30 +627,9 @@ class DatabaseGateway:
                     expression = self.quote_identifier(name)
                     if not metadata["is_text_searchable"]:
                         expression = self.text_cast(expression)
-                    like_parts.append(f"{expression} LIKE %s ESCAPE '!'")
+                    like_parts.append(f"{expression} LIKE {self.bind_placeholder(len(params) + 1)} ESCAPE '!'")
                     params.append(f"%{escaped_term}%")
                 where_parts.append("(" + " OR ".join(like_parts) + ")")
-
-        time_params_count = 0
-        if time_column:
-            if time_column not in column_map:
-                raise AppError("时间列不存在。", 400)
-            normalized_from: str | None
-            normalized_to: str | None
-            if (time_mode or "range") == "point":
-                normalized_from, normalized_to = normalize_time_point(time_point)
-            else:
-                normalized_from = normalize_time_input(time_from, "start")
-                normalized_to = normalize_time_input(time_to, "end")
-
-            if normalized_from:
-                where_parts.insert(0, f"{self.quote_identifier(time_column)} >= %s")
-                params.insert(0, normalized_from)
-                time_params_count += 1
-            if normalized_to:
-                where_parts.insert(time_params_count, f"{self.quote_identifier(time_column)} <= %s")
-                params.insert(time_params_count, normalized_to)
-                time_params_count += 1
 
         order_column = sort_by if sort_by in column_map else None
         if not order_column:
@@ -591,9 +644,8 @@ class DatabaseGateway:
         if where_parts:
             sql += " WHERE " + " AND ".join(where_parts)
         sql += f" ORDER BY {self.quote_identifier(order_column)} {'DESC' if direction == 'desc' else 'ASC'}"
-        sql += self.limit_clause()
-        params.append(limit)
-        rows, elapsed_time = self._fetch_all(profile, password, sql, tuple(params))
+        sql, query_params = self.apply_limit(sql, tuple(params), limit)
+        rows, elapsed_time = self._fetch_all(profile, password, sql, query_params)
         return {
             "columns": selected_columns,
             "rows": rows,
@@ -605,25 +657,49 @@ class DatabaseGateway:
             "elapsed_time": elapsed_time,
         }
 
-    def execute_readonly_sql(self, profile: ConnectionProfile, password: str | None, sql: str) -> dict[str, Any]:
-        safe_sql = parse_readonly_sql(sql)
-        rows, elapsed_time, columns, truncated = self._fetch_limited(profile, password, safe_sql, (), MAX_SQL_ROWS)
-        return {
-            "columns": columns,
-            "rows": rows,
-            "elapsed_time": elapsed_time,
-            "limit": MAX_SQL_ROWS,
-            "truncated": truncated,
-        }
+    def execute_sql(self, profile: ConnectionProfile, password: str | None, sql: str) -> dict[str, Any]:
+        statement = parse_sql_statement(sql)
+        return self._execute_sql_statement(profile, password, statement)
 
-    def _rows_to_dicts(self, rows: Any) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            if isinstance(row, Mapping):
-                result.append(dict(row))
-            else:
-                result.append(dict(row))
-        return result
+    def _description_names(self, description: Any) -> list[str]:
+        names: list[str] = []
+        for item in description or []:
+            name = getattr(item, "name", None)
+            if name is None:
+                if isinstance(item, str):
+                    name = item
+                else:
+                    name = item[0]
+            names.append(str(name))
+        return names
+
+    def _row_to_dict(self, row: Any, description: Any = None) -> dict[str, Any]:
+        if isinstance(row, Mapping):
+            return dict(row)
+        if hasattr(row, "_asdict"):
+            return dict(row._asdict())
+        names = self._description_names(description)
+        if names:
+            return dict(zip(names, row))
+        return dict(row)
+
+    def _rows_to_dicts(self, rows: Any, description: Any = None) -> list[dict[str, Any]]:
+        return [self._row_to_dict(row, description) for row in rows]
+
+    def _execute(self, cursor: Any, sql: str, params: tuple[Any, ...]) -> None:
+        if params:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
+
+    def _row_value(self, row: Mapping[str, Any], key: str) -> Any:
+        if key in row:
+            return row[key]
+        normalized_key = key.casefold()
+        for row_key, value in row.items():
+            if str(row_key).casefold() == normalized_key:
+                return value
+        return None
 
     def _fetch_all(self, profile: ConnectionProfile, password: str | None, sql: str, params: tuple[Any, ...]) -> tuple[list[dict[str, Any]], float]:
         conn = None
@@ -632,10 +708,10 @@ class DatabaseGateway:
         try:
             conn = self.connect(profile, password)
             cursor = self._cursor(conn)
-            cursor.execute(sql, params)
+            self._execute(cursor, sql, params)
             rows = cursor.fetchall()
             elapsed_time = (datetime.now() - start_time).total_seconds()
-            return self._rows_to_dicts(rows), elapsed_time
+            return self._rows_to_dicts(rows, cursor.description), elapsed_time
         except AppError:
             raise
         except Exception as exc:
@@ -646,30 +722,45 @@ class DatabaseGateway:
             if conn:
                 close_quietly(conn)
 
-    def _fetch_limited(
+    def _execute_sql_statement(
         self,
         profile: ConnectionProfile,
         password: str | None,
         sql: str,
-        params: tuple[Any, ...],
-        max_rows: int,
-    ) -> tuple[list[dict[str, Any]], float, list[str], bool]:
+    ) -> dict[str, Any]:
         conn = None
         cursor = None
         start_time = datetime.now()
         try:
             conn = self.connect(profile, password)
             cursor = self._cursor(conn, unbuffered=True)
-            cursor.execute(sql, params)
-            rows = cursor.fetchmany(max_rows + 1)
-            limited_rows = self._rows_to_dicts(rows[:max_rows])
-            columns = [getattr(item, "name", item[0]) for item in cursor.description or []]
+            self._execute(cursor, sql, ())
+            has_result_set = cursor.description is not None
+            columns: list[str] = []
+            rows: list[dict[str, Any]] = []
+            truncated = False
+            if has_result_set:
+                fetched_rows = cursor.fetchmany(MAX_SQL_ROWS + 1)
+                rows = self._rows_to_dicts(fetched_rows[:MAX_SQL_ROWS], cursor.description)
+                columns = self._description_names(cursor.description)
+                truncated = len(fetched_rows) > MAX_SQL_ROWS
+            raw_rowcount = getattr(cursor, "rowcount", None)
+            affected_rows = raw_rowcount if isinstance(raw_rowcount, int) and raw_rowcount >= 0 else None
             elapsed_time = (datetime.now() - start_time).total_seconds()
-            return limited_rows, elapsed_time, columns, len(rows) > max_rows
+            return {
+                "statement_type": sql_statement_type(sql),
+                "has_result_set": has_result_set,
+                "columns": columns,
+                "rows": rows,
+                "affected_rows": affected_rows,
+                "elapsed_time": elapsed_time,
+                "limit": MAX_SQL_ROWS,
+                "truncated": truncated,
+            }
         except AppError:
             raise
         except Exception as exc:
-            raise AppError("数据库查询失败。", 400, redact_sensitive_text(str(exc), password))
+            raise AppError("SQL 执行失败。", 400, redact_sensitive_text(str(exc), password))
         finally:
             if cursor:
                 close_quietly(cursor)
@@ -815,8 +906,8 @@ class SQLServerGateway(DatabaseGateway):
         ensure_identifier(name, "标识符")
         return f"[{name}]"
 
-    def limit_clause(self) -> str:
-        return " OFFSET 0 ROWS FETCH NEXT %s ROWS ONLY"
+    def limit_clause(self, parameter_index: int = 1) -> str:
+        return f" OFFSET 0 ROWS FETCH NEXT {self.bind_placeholder(parameter_index)} ROWS ONLY"
 
     def current_database_query(self) -> str:
         return "SELECT DB_NAME() AS current_database, @@VERSION AS version"
@@ -840,6 +931,193 @@ class SQLServerGateway(DatabaseGateway):
         return SQLSERVER_DRIVER.connect(**kwargs)
 
 
+class OracleGateway(DatabaseGateway):
+    database_type = "oracle"
+    display_name = "Oracle"
+    text_cast_type = "VARCHAR2(4000)"
+
+    def _ensure_driver(self) -> None:
+        if ORACLE_DRIVER is None:
+            raise AppError(
+                "未找到 Oracle 驱动。先执行 `pip install -r requirements.txt`。",
+                500,
+                "需要 python-oracledb。",
+            )
+
+    def bind_placeholder(self, position: int) -> str:
+        return f":{position}"
+
+    def apply_limit(self, sql: str, params: tuple[Any, ...], limit: int) -> tuple[str, tuple[Any, ...]]:
+        placeholder = self.bind_placeholder(len(params) + 1)
+        return f"SELECT * FROM ({sql}) WHERE ROWNUM <= {placeholder}", (*params, limit)
+
+    def current_database_query(self) -> str:
+        return (
+            "SELECT SYS_CONTEXT('USERENV', 'DB_NAME') AS current_database, "
+            "(SELECT banner FROM v$version WHERE ROWNUM = 1) AS version FROM dual"
+        )
+
+    def list_schemas_query(self) -> tuple[str, tuple[Any, ...]]:
+        return (
+            """
+            SELECT username AS schema_name
+            FROM all_users
+            ORDER BY username
+            """,
+            (),
+        )
+
+    def list_tables_query(self, schema: str) -> tuple[str, tuple[Any, ...]]:
+        ensure_identifier(schema, "Schema 名")
+        first_schema = self.bind_placeholder(1)
+        second_schema = self.bind_placeholder(2)
+        return (
+            f"""
+            SELECT table_name, table_type
+            FROM (
+                SELECT table_name, 'BASE TABLE' AS table_type
+                FROM all_tables
+                WHERE owner = {first_schema}
+                UNION ALL
+                SELECT view_name AS table_name, 'VIEW' AS table_type
+                FROM all_views
+                WHERE owner = {second_schema}
+            )
+            ORDER BY table_name
+            """,
+            (schema.upper(), schema.upper()),
+        )
+
+    def list_columns_query(self, schema: str, table: str) -> tuple[str, tuple[Any, ...]]:
+        ensure_identifier(schema, "Schema 名")
+        ensure_identifier(table, "表名")
+        owner_placeholder = self.bind_placeholder(1)
+        table_placeholder = self.bind_placeholder(2)
+        return (
+            f"""
+            SELECT column_name, data_type, data_type AS column_type, nullable AS is_nullable
+            FROM all_tab_columns
+            WHERE owner = {owner_placeholder} AND table_name = {table_placeholder}
+            ORDER BY column_id
+            """,
+            (schema.upper(), table.upper()),
+        )
+
+    def connect(self, profile: ConnectionProfile, password: str | None):
+        self._ensure_driver()
+        if not password:
+            raise AppError("需要密码才能连接数据库。", 400)
+        if not profile.database:
+            raise AppError("Oracle 连接需要填写服务名。", 400)
+        dsn = ORACLE_DRIVER.makedsn(profile.host, profile.port, service_name=profile.database)
+        conn = ORACLE_DRIVER.connect(user=profile.username, password=password, dsn=dsn)
+        conn.call_timeout = int(self.query_timeout_seconds * 1000)
+        conn.autocommit = True
+        return conn
+
+
+class XuguGateway(DatabaseGateway):
+    database_type = "xugu"
+    display_name = "虚谷数据库"
+    text_cast_type = "VARCHAR"
+
+    def _ensure_driver(self) -> None:
+        if XUGU_DRIVER is None:
+            raise AppError(
+                "未找到虚谷数据库驱动。请安装厂商提供的 `xgcondb` Python 驱动。",
+                500,
+                "xgcondb 不在 PyPI，需要使用与当前 Python 和操作系统匹配的厂商驱动。",
+            )
+
+    def bind_placeholder(self, position: int) -> str:
+        return "?"
+
+    def apply_limit(self, sql: str, params: tuple[Any, ...], limit: int) -> tuple[str, tuple[Any, ...]]:
+        return f"SELECT * FROM ({sql}) WHERE ROWNUM <= ?", (*params, limit)
+
+    def current_database_query(self) -> str:
+        return "SELECT DATABASE() AS current_database, NULL AS version FROM dual"
+
+    def list_schemas_query(self) -> tuple[str, tuple[Any, ...]]:
+        return (
+            """
+            SELECT schema_name
+            FROM all_schemas
+            WHERE db_id = (SELECT db_id FROM all_databases WHERE db_name = DATABASE())
+            ORDER BY schema_name
+            """,
+            (),
+        )
+
+    def list_tables_query(self, schema: str) -> tuple[str, tuple[Any, ...]]:
+        ensure_identifier(schema, "Schema 名")
+        return (
+            """
+            SELECT table_name,
+                   CASE WHEN table_type = 0 THEN 'BASE TABLE' ELSE 'VIEW' END AS table_type
+            FROM all_tables
+            WHERE db_id = (SELECT db_id FROM all_databases WHERE db_name = DATABASE())
+              AND schema_id = (
+                  SELECT schema_id
+                  FROM all_schemas
+                  WHERE db_id = (SELECT db_id FROM all_databases WHERE db_name = DATABASE())
+                    AND schema_name = ?
+              )
+            ORDER BY table_name
+            """,
+            (schema.upper(),),
+        )
+
+    def list_columns_query(self, schema: str, table: str) -> tuple[str, tuple[Any, ...]]:
+        ensure_identifier(schema, "Schema 名")
+        ensure_identifier(table, "表名")
+        return (
+            """
+            SELECT col_name AS column_name,
+                   type_name AS data_type,
+                   type_name AS column_type,
+                   CASE WHEN not_null THEN 'NO' ELSE 'YES' END AS is_nullable
+            FROM all_columns
+            WHERE db_id = (SELECT db_id FROM all_databases WHERE db_name = DATABASE())
+              AND table_id = (
+                  SELECT table_id
+                  FROM all_tables
+                  WHERE db_id = (SELECT db_id FROM all_databases WHERE db_name = DATABASE())
+                    AND schema_id = (
+                        SELECT schema_id
+                        FROM all_schemas
+                        WHERE db_id = (SELECT db_id FROM all_databases WHERE db_name = DATABASE())
+                          AND schema_name = ?
+                    )
+                    AND table_name = ?
+              )
+            ORDER BY col_no
+            """,
+            (schema.upper(), table.upper()),
+        )
+
+    def connect(self, profile: ConnectionProfile, password: str | None):
+        self._ensure_driver()
+        if not password:
+            raise AppError("需要密码才能连接数据库。", 400)
+        if not profile.database:
+            raise AppError("虚谷数据库连接需要填写数据库名。", 400)
+        conn = XUGU_DRIVER.connect(
+            host=profile.host,
+            port=profile.port,
+            database=profile.database,
+            user=profile.username,
+            password=password,
+            charset="UTF8",
+        )
+        autocommit = getattr(conn, "autocommit", None)
+        if callable(autocommit):
+            autocommit(True)
+        else:
+            conn.autocommit = True
+        return conn
+
+
 class GatewayResolver:
     def __init__(
         self,
@@ -850,6 +1128,8 @@ class GatewayResolver:
             "mysql": MySQLGateway(query_timeout_seconds=query_timeout_seconds),
             "postgresql": PostgreSQLGateway(query_timeout_seconds=query_timeout_seconds),
             "sqlserver": SQLServerGateway(query_timeout_seconds=query_timeout_seconds),
+            "oracle": OracleGateway(query_timeout_seconds=query_timeout_seconds),
+            "xugu": XuguGateway(query_timeout_seconds=query_timeout_seconds),
         }
         self._cache: dict[tuple[str, str, int, str, str], str] = {}
 
@@ -858,6 +1138,8 @@ class GatewayResolver:
             "mysql": {"available": MYSQL_DRIVER is not None, "driver": MYSQL_DRIVER_NAME},
             "postgresql": {"available": POSTGRES_DRIVER is not None, "driver": POSTGRES_DRIVER_NAME},
             "sqlserver": {"available": SQLSERVER_DRIVER is not None, "driver": SQLSERVER_DRIVER_NAME},
+            "oracle": {"available": ORACLE_DRIVER is not None, "driver": ORACLE_DRIVER_NAME},
+            "xugu": {"available": XUGU_DRIVER is not None, "driver": XUGU_DRIVER_NAME},
         }
 
     def _cache_key(self, profile: ConnectionProfile) -> tuple[str, str, int, str, str]:
@@ -878,7 +1160,9 @@ class GatewayResolver:
     def _probe_auto(self, profile: ConnectionProfile, password: str | None) -> tuple[str, DatabaseGateway, dict[str, Any]]:
         errors: list[str] = []
         for database_type in AUTO_PROBE_ORDER:
-            gateway = self.gateways[database_type]
+            gateway = self.gateways.get(database_type)
+            if gateway is None:
+                continue
             try:
                 result = gateway.test_connection(profile, password)
                 self._cache[self._cache_key(profile)] = database_type
@@ -938,9 +1222,9 @@ class GatewayResolver:
         _database_type, gateway = self.resolve_gateway(profile, password)
         return gateway.search_rows(**kwargs)
 
-    def execute_readonly_sql(self, profile: ConnectionProfile, password: str | None, sql: str) -> dict[str, Any]:
+    def execute_sql(self, profile: ConnectionProfile, password: str | None, sql: str) -> dict[str, Any]:
         _database_type, gateway = self.resolve_gateway(profile, password)
-        return gateway.execute_readonly_sql(profile, password, sql)
+        return gateway.execute_sql(profile, password, sql)
 
 
 class Application:
@@ -1096,10 +1380,10 @@ class Application:
             self._send_json(handler, 200, result)
             return
 
-        if path == "/api/query/sql-readonly" and method == "POST":
+        if path == "/api/query/sql" and method == "POST":
             profile, password = self._profile_and_password_from_body(body)
             sql = self._require_body_value(body, "sql")
-            result = self.gateway.execute_readonly_sql(profile, password, sql)
+            result = self.gateway.execute_sql(profile, password, sql)
             self._send_json(handler, 200, result)
             return
 

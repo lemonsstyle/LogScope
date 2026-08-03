@@ -23,6 +23,7 @@ def main():
         ("PyMySQL", "pymysql"),
         ("psycopg", "psycopg"),
         ("pymssql", "pymssql"),
+        ("python-oracledb", "oracledb"),
     )
     for display_name, module_name in required_drivers:
         try:
@@ -32,6 +33,15 @@ def main():
             print(f"\n[错误] 未安装 {display_name}")
             print("请运行: pip install -r requirements.txt")
             sys.exit(1)
+
+    has_xugu_driver = True
+    try:
+        import xgcondb
+        print("\n✓ xgcondb 已安装")
+    except ImportError:
+        has_xugu_driver = False
+        print("\n[警告] 未安装虚谷数据库 xgcondb 驱动")
+        print("如需在 Windows 包中使用虚谷数据库，请先安装厂商提供的匹配版本驱动。")
 
     # 确认项目文件存在
     project_root = Path(__file__).parent
@@ -65,11 +75,15 @@ def main():
         "--hidden-import=psycopg_binary",
         "--hidden-import=pymssql",
         "--hidden-import=_mssql",
+        "--hidden-import=oracledb",
         "--collect-binaries=psycopg_binary",
         "--collect-binaries=pymssql",
+        "--collect-all=oracledb",
         "--console",
         str(app_file)
     ]
+    if has_xugu_driver:
+        cmd.extend(("--hidden-import=xgcondb", "--collect-all=xgcondb"))
 
     print("\n开始打包...")
     print(f"命令: {' '.join(cmd)}")

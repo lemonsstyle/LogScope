@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-LogScope is a local, read-only database log query tool. It connects to MySQL, PostgreSQL, or SQL Server through a browser UI and supports both form-based filtering and read-only `SELECT` queries.
+LogScope is a local, read-only database log query tool. It connects to MySQL, PostgreSQL, SQL Server, Oracle, or Xugu Database through a browser UI and supports both form-based filtering and read-only `SELECT` queries.
 
 ## Security and Privacy
 
@@ -20,6 +20,8 @@ python3 -m pip install -U pip
 pip install -r requirements.txt
 python3 app.py --host 127.0.0.1 --port 8765
 ```
+
+Oracle uses `python-oracledb`, which is included in `requirements.txt`. The Xugu `xgcondb` driver is not published on PyPI; obtain a build matching your Python version and operating system from the vendor and install it in the same environment.
 
 Windows PowerShell:
 
@@ -47,8 +49,11 @@ http://127.0.0.1:8765
 Notes:
 
 - For MySQL, the "Database/Schema" list represents databases.
-- For PostgreSQL and SQL Server, "Default Database" is the target database for the connection, while the "Database/Schema" list represents schemas.
-- Advanced SQL only allows a single read-only `SELECT` query.
+- For PostgreSQL, SQL Server, and Xugu Database, "Default Database" is the target database for the connection, while the "Database/Schema" list represents schemas.
+- For Oracle, enter the service name in "Default Database/Service Name"; the "Database/Schema" list represents Oracle schemas.
+- Default ports: MySQL `3306`, PostgreSQL `5432`, SQL Server `1433`, Oracle `1521`, and Xugu Database `5138`.
+- Advanced SQL accepts one query, DML, DDL, privilege, or stored-procedure call. Writes run with the current connection account and may be committed immediately and be irreversible.
+- Advanced SQL still rejects multi-statement requests and high-risk server file access, operating-system commands, and blocking expressions.
 
 ## Package for Windows
 
@@ -62,6 +67,8 @@ pip install -r requirements.txt
 pip install pyinstaller
 python build_windows.py
 ```
+
+To package Xugu support, install the vendor-provided Windows `xgcondb` driver before running the build script. The script detects and collects it automatically. Packaging still succeeds without it, but Xugu connections in the generated application report that the driver is missing.
 
 The output directory is:
 

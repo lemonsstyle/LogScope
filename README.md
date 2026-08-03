@@ -2,7 +2,7 @@
 
 [English](README.en.md) | 简体中文
 
-LogScope 是一个本地运行的只读数据库日志查询工具。它通过浏览器界面连接 MySQL、PostgreSQL 或 SQL Server，支持表单筛选和只读 `SELECT` 查询。
+LogScope 是一个本地运行的只读数据库日志查询工具。它通过浏览器界面连接 MySQL、PostgreSQL、SQL Server、Oracle 或虚谷数据库，支持表单筛选和只读 `SELECT` 查询。
 
 ## 安全与隐私
 
@@ -20,6 +20,8 @@ python3 -m pip install -U pip
 pip install -r requirements.txt
 python3 app.py --host 127.0.0.1 --port 8765
 ```
+
+Oracle 使用 `python-oracledb`，已包含在 `requirements.txt`。虚谷数据库的 `xgcondb` 驱动不在 PyPI，请从厂商获取与当前 Python 和操作系统匹配的版本并安装到同一环境。
 
 Windows PowerShell：
 
@@ -47,8 +49,11 @@ http://127.0.0.1:8765
 说明：
 
 - MySQL 的“数据库/Schema”列表对应 database。
-- PostgreSQL 和 SQL Server 的“默认数据库”是连接目标 database，“数据库/Schema”列表对应 schema。
-- 高级 SQL 只允许单条只读 `SELECT` 查询。
+- PostgreSQL、SQL Server 和虚谷数据库的“默认数据库”是连接目标 database，“数据库/Schema”列表对应 schema。
+- Oracle 的“默认数据库/服务名”填写 service name，“数据库/Schema”列表对应 Oracle schema。
+- 默认端口：MySQL `3306`、PostgreSQL `5432`、SQL Server `1433`、Oracle `1521`、虚谷数据库 `5138`。
+- 高级 SQL 允许执行单条查询、增删改、DDL、授权和调用存储过程等语句；写操作会按当前连接账号权限执行，并可能立即提交且无法撤销。
+- 高级 SQL 仍会拒绝多语句请求，以及服务器文件读写、系统命令和阻塞等待等高风险表达式。
 
 ## Windows 打包
 
@@ -62,6 +67,8 @@ pip install -r requirements.txt
 pip install pyinstaller
 python build_windows.py
 ```
+
+如需打包虚谷数据库支持，请在运行打包脚本前安装厂商提供的 Windows `xgcondb` 驱动；脚本会自动检测并收集该驱动。未检测到时仍可打包，但生成程序中的虚谷连接会提示缺少驱动。
 
 打包成功后输出目录：
 
